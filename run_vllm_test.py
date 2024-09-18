@@ -1,5 +1,5 @@
 import torch
-#from hf_olmo import *
+from hf_olmo import *
 from vllm import SamplingParams, LLM
 from vllm.model_executor.utils import set_random_seed
 from transformers import AutoModelForCausalLM, AutoTokenizer
