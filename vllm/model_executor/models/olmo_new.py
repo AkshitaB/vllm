@@ -32,6 +32,7 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
@@ -86,13 +87,18 @@ class OlmoAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        if getattr(config, "attention_layer_norm", False):
-            self.k_norm = nn.LayerNorm(
+        if config.attention_layer_norm:
+            # TODO: finish adding qk norm and norm_after
+            self.k_norm = RMSNorm(
                 (config.d_model // config.n_heads) * config.effective_n_kv_heads,
-                elementwise_affine=config.attention_layer_norm_with_affine,
-                bias=False,
+                eps=config.layer_norm_eps,
+                #elementwise_affine=config.attention_layer_norm_with_affine,
+                #bias=False,
             )
-
+            self.q_norm = RMSNorm(
+                config.hidden_size,
+                eps=config.layer_norm_eps,
+            )
 
         # Rotary embeddings.
         self.rotary_emb = get_rope(
@@ -204,12 +210,19 @@ class OlmoDecoderLayer(nn.Module):
         self.mlp = OlmoMLP(config, quant_config)
 
         # LayerNorm
+
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+        """
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             elementwise_affine=False,
                                             bias=False)
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
                                                      elementwise_affine=False,
                                                      bias=False)
+        """
 
     def forward(
         self,
@@ -248,9 +261,12 @@ class OlmoModel(nn.Module):
             OlmoDecoderLayer(config, cache_config, quant_config)
             for layer_idx in range(config.num_hidden_layers)
         ])
-        self.norm = nn.LayerNorm(config.hidden_size,
-                                 elementwise_affine=config.layer_norm_with_affine,
-                                 bias=config.bias_for_layer_norm)
+        self.norm = RMSNorm(
+            config.hidden_size,
+            eps=config.layer_norm_eps,
+            #elementwise_affine=config.layer_norm_with_affine,
+            #bias=config.bias_for_layer_norm
+        )
 
     def forward(
         self,
@@ -343,7 +359,26 @@ class OlmoNewForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
+    def _create_map(self):
+        mapper = {}
+        for layer_i in range(self.config.n_layers):
+            mapper[f"model.transformer.blocks.{layer_i}.att_proj.weight"] = f"model.layers.{layer_i}.self_attn.qkv_proj.weight"
+            mapper[f"model.transformer.blocks.{layer_i}.attn_out.weight"] = f"model.layers.{layer_i}.self_attn.o_proj.weight"
+            mapper[f"model.transformer.blocks.{layer_i}.ff_proj.weight"] = f"model.layers.{layer_i}.mlp.gate_up_proj.weight"
+            mapper[f"model.transformer.blocks.{layer_i}.ff_out.weight"] = f"model.layers.{layer_i}.mlp.down_proj.weight"
+
+            mapper[f"model.transformer.blocks.{layer_i}.attn_norm.weight"] = f"model.layers.{layer_i}.input_layernorm.weight"
+            mapper[f"model.transformer.blocks.{layer_i}.ff_norm.weight"] = f"model.layers.{layer_i}.post_attention_layernorm.weight"
+            mapper[f"model.transformer.blocks.{layer_i}.k_norm.weight"] = f"model.layers.{layer_i}.self_attn.k_norm.weight"
+            mapper[f"model.transformer.blocks.{layer_i}.q_norm.weight"] = f"model.layers.{layer_i}.self_attn.q_norm.weight"
+
+        mapper["model.transformer.ln_f.weight"] = "model.norm.weight"
+        mapper["model.transformer.ff_out.weight"] = "lm_head.weight"
+        return mapper
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        mapper = self._create_map()
+        print("mapper", mapper)
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -353,8 +388,6 @@ class OlmoNewForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
             ("model.embed_tokens.weight", "model.transformer.wte.weight", None),
             ("lm_head.weight", "model.transformer.wte.weight", None),
-            ("lm_head.weight", "model.transformer.ff_out.weight", None),
-            ("model.norm.weight", "model.transformer.ln_f.weight", None),
         ]
 
         params_dict = dict(self.named_parameters(remove_duplicate=False))
@@ -395,7 +428,7 @@ class OlmoNewForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                param = params_dict[name]
+                param = params_dict[mapper.get(name, name)]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
