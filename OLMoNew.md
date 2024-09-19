@@ -1,11 +1,13 @@
 
 ## vllm for Peteish
 
-(https://github.com/AkshitaB/vllm)
+new vllm olmo version: [olmo_new.py](https://github.com/AkshitaB/vllm/blob/main/vllm/model_executor/models/olmo_new.py)
+
+### How to run
 
 - Install vllm from my version (warning: installing from source takes AGES; upwards of 2 hours).
 - convert peteish checkpoint to hf\_olmo style checkpoint (I tested with `/net/nfs.cirrascale/allennlp/akshitab/model-checkpoints/peteish7/step11931-unsharded-hf` — from [peteish7-anneal-from-928646-50B-nowup-dclm07-flan](https://us-east-1.console.aws.amazon.com/s3/buckets/ai2-llm?prefix=checkpoints/OLMo-medium/peteish7-anneal-from-928646-50B-nowup-dclm07-flan/))
-- Then run vllm as usual (make sure to import hf\_olmo)
+- Then run vllm as usual (make sure to import hf_olmo)
 
 ```python
 from hf_olmo import *
@@ -17,7 +19,14 @@ vllm_out = llm.generate([prompt], sampling_params=s)
 outputs["vllm"] = vllm_out[0].outputs[0].text
 ```
 
-- Note: Their RMSNorm cuda kernal implementation causes some discrepancies (still coherent outputs, but different than hf), so I use the `forward_native` call, which is native pytorch. This is slightly slower, so if you’re ok with different outputs than hf, swap out the native calls for regular calls here: https://github.com/AkshitaB/vllm/blob/main/vllm/model\_executor/models/olmo\_new.py#L144
+### Things to keep in mind
+
+- This is a barebones implementation which works exactly with peteish config (things like RMSNorm are hardcoded to keep implementation simple). I have not added clean if-else statements for different norm types, etc. A non-peteish model will likely not produce the right results.
+
+- Their RMSNorm cuda kernal implementation causes some discrepancies (still coherent outputs, but different than hf), so I use the `forward_native` call, which is native pytorch. This is slightly slower, so if you’re ok with different outputs than hf, swap out the native calls for regular calls here: https://github.com/AkshitaB/vllm/blob/main/vllm/model_executor/models/olmo_new.py#L144 (I've shared this with Niklas; possibly the OLMoE discrepancies also stem from this).
+
+### Benchmarking
+
 - Run benchmarking script:
 
 ```python
@@ -25,18 +34,12 @@ export DATAP=/net/nfs.cirrascale/allennlp/akshitab/eval_data/ShareGPT_V3_unfilte
 python benchmarks/benchmark_throughput.py --backend vllm --dataset $DATAP --model /net/nfs.cirrascale/allennlp/akshitab/model-checkpoints/peteish7/step11931-unsharded-hf
 ```
 
-- Results:
-    
-    peteish-vllm-regular-norm: 
-    
-    ```python
-    Processed prompts: 100%|████████████████████████| 1000/1000 [01:21<00:00, 12.32it/s, est. speed input: 2641.08 toks/s, output: 2463.60 toks/s]
-    Throughput: 12.23 requests/s, 5067.30 tokens/s
-    ```
-    
-    peteish-vllm-native-norm (current implementation): 
-    
-    ```python
-    Processed prompts: 100%|████████████████████████| 1000/1000 [01:16<00:00, 13.15it/s, est. speed input: 2819.28 toks/s, output: 2629.82 toks/s]
-    Throughput: 13.05 requests/s, 5406.68 tokens/s
-    ```
+  Input: 1000 prompts from sharegpt
+  
+  GPU: 1 x A100-80G
+
+  | Run | Throughput | Clocktime |
+  | --- | --- | --- |
+  | peteish-vllm-regular-norm | Throughput: 13.00 requests/s, 5384.33 tokens/s | ~ 1 min |
+  | peteish-vllm-native-norm (current implementation) | Throughput: 11.99 requests/s, 4968.23 tokens/s | ~ 1 min |
+  | non-vllm hf baseline | was too slow to run full benchmark | > 1.5 hours (estimated) |
