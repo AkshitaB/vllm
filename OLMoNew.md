@@ -23,7 +23,7 @@ outputs["vllm"] = vllm_out[0].outputs[0].text
 
 - This is a barebones implementation which works exactly with peteish config (things like RMSNorm are hardcoded to keep implementation simple). I have not added clean if-else statements for different norm types, etc. A non-peteish model will likely not produce the right results.
 
-- Their RMSNorm cuda kernal implementation causes some discrepancies (still coherent outputs, but different than hf), so I use the `forward_native` call, which is native pytorch. This is slightly slower, so if you’re ok with different outputs than hf, swap out the native calls for regular calls here: https://github.com/AkshitaB/vllm/blob/main/vllm/model_executor/models/olmo_new.py#L144
+- Their RMSNorm cuda kernal implementation causes some discrepancies (still coherent outputs, but different than hf), so I use the `forward_native` call, which is native pytorch. This is slightly slower, so if you’re ok with different outputs than hf, swap out the native calls for regular calls here: https://github.com/AkshitaB/vllm/blob/main/vllm/model_executor/models/olmo_new.py#L144 (I've shared this with Niklas; possibly the OLMoE discrepancies also stem from this).
 
 ### Benchmarking
 
@@ -35,6 +35,8 @@ python benchmarks/benchmark_throughput.py --backend vllm --dataset $DATAP --mode
 ```
 
   Input: 1000 prompts from sharegpt
+  
+  GPU: 1 x A100-80G
 
   | Run | Throughput | Clocktime |
   | --- | --- | --- |
