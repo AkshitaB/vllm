@@ -48,6 +48,14 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 
+class FlippedSiluAndMul(SiluAndMul):
+    """OLMo is trained with SwiGLU with flipped halves."""
+
+    def forward(self, x: torch.Tensor):
+        a, b = x.chunk(2, dim=-1)
+        flipped = torch.cat((b, a), dim=-1)
+        return super().forward(flipped)
+
 class OlmoAttention(nn.Module):
     """
     This is the attention block where the output is computed as
@@ -133,6 +141,8 @@ class OlmoAttention(nn.Module):
         if self.clip_qkv is not None:
             qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
+        q = self.q_norm.forward_native(q)
+        k = self.k_norm.forward_native(k)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
@@ -171,7 +181,7 @@ class OlmoMLP(nn.Module):
         )
 
         # Activation function.
-        self.act_fn = SiluAndMul()
+        self.act_fn = FlippedSiluAndMul()
 
         # Feed-forward output projection.
         self.down_proj = RowParallelLinear(
@@ -211,6 +221,7 @@ class OlmoDecoderLayer(nn.Module):
 
         # LayerNorm
 
+        self.norm_after = config.norm_after
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
 
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -233,15 +244,24 @@ class OlmoDecoderLayer(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Attention block.
         residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(positions, hidden_states, kv_cache,
-                                       attn_metadata)
+        if self.norm_after:
+            hidden_states = self.self_attn(positions, hidden_states, kv_cache,
+                                           attn_metadata)
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states = self.input_layernorm(hidden_states)
+            hidden_states = self.self_attn(positions, hidden_states, kv_cache,
+                                           attn_metadata)
         hidden_states = hidden_states + residual
 
         # MLP block.
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        if self.norm_after:
+            hidden_states = self.mlp(hidden_states)
+            hidden_states = self.post_attention_layernorm(hidden_states)
+        else:
+            hidden_states = self.post_attention_layernorm(hidden_states)
+            hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
 
@@ -313,17 +333,19 @@ class OlmoNewForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.model = OlmoModel(config, cache_config, quant_config)
-        if config.tie_word_embeddings:
+        if config.weight_tying:
             self.lm_head = self.model.embed_tokens
         else:
             self.unpadded_vocab_size = config.vocab_size
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                #self.unpadded_vocab_size,
+                config.embedding_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
+                org_num_embeddings=config.embedding_size,
+                #org_num_embeddings=config.vocab_size,
                 quant_config=quant_config,
             )
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.embedding_size)
         self.sampler = Sampler()
 
     def forward(
@@ -373,6 +395,7 @@ class OlmoNewForCausalLM(nn.Module):
             mapper[f"model.transformer.blocks.{layer_i}.q_norm.weight"] = f"model.layers.{layer_i}.self_attn.q_norm.weight"
 
         mapper["model.transformer.ln_f.weight"] = "model.norm.weight"
+        mapper["model.transformer.wte.weight"] = "model.embed_tokens.weight"
         mapper["model.transformer.ff_out.weight"] = "lm_head.weight"
         return mapper
 
@@ -386,8 +409,6 @@ class OlmoNewForCausalLM(nn.Module):
             ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            ("model.embed_tokens.weight", "model.transformer.wte.weight", None),
-            ("lm_head.weight", "model.transformer.wte.weight", None),
         ]
 
         params_dict = dict(self.named_parameters(remove_duplicate=False))
@@ -402,7 +423,7 @@ class OlmoNewForCausalLM(nn.Module):
             # With tie_word_embeddings, we can skip lm_head.weight
             # The weight might appear unnecessarily in the files if the model is
             # processed with quantization, LoRA, fine-tuning, etc.
-            if self.config.tie_word_embeddings and "lm_head.weight" in name:
+            if self.config.weight_tying and "lm_head.weight" in name:
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
@@ -411,18 +432,9 @@ class OlmoNewForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                print(params_dict.keys())
-                print(name)
-                print(param_name, weight_name)
                 param = params_dict[name]
-                if shard_id is None:
-                    print(param_name, weight_name)
-                    weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                    weight_loader(param, loaded_weight)
-                else:
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
