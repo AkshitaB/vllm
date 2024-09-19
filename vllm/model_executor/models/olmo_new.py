@@ -143,6 +143,8 @@ class OlmoAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q = self.q_norm.forward_native(q)
         k = self.k_norm.forward_native(k)
+        #q = self.q_norm(q) 
+        #k = self.k_norm(k)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)

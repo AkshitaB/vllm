@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
 
+from hf_olmo import *
 
 def sample_requests(
     dataset_path: str,
