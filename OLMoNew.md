@@ -5,7 +5,24 @@ new vllm olmo version: [olmo_new.py](https://github.com/AkshitaB/vllm/blob/main/
 
 ### How to run
 
-- Install vllm from my version (warning: installing from source takes AGES; upwards of 2 hours).
+- ~~Install vllm from my version (warning: installing from source takes AGES; upwards of 2 hours)~~.
+- Register the model:
+  ```
+  from hf_olmo import *
+  from transformers import AutoModelForCausalLM
+  from olmo_new import OlmoNewForCausalLM
+  
+  model = AutoModelForCausalLM.from_pretrained(
+      "/net/nfs.cirrascale/allennlp/akshitab/model-checkpoints/peteish7/step11931-unsharded-hf",
+      trust_remote_code=True,
+  )
+  
+  # instead of installing from source, https://github.com/AkshitaB/vllm/blob/c96643ec56da3ab8cefba03cadf7731788e756b5/vllm/model_executor/models/__init__.py#L49
+  # here we just register the new model class
+  from vllm.model_executor.models import ModelRegistry
+  ModelRegistry.register_model("OLMoForCausalLM", OlmoNewForCausalLM)
+  from vllm import LLM, SamplingParams
+  ```
 - convert peteish checkpoint to hf\_olmo style checkpoint (I tested with `/net/nfs.cirrascale/allennlp/akshitab/model-checkpoints/peteish7/step11931-unsharded-hf` — from [peteish7-anneal-from-928646-50B-nowup-dclm07-flan](https://us-east-1.console.aws.amazon.com/s3/buckets/ai2-llm?prefix=checkpoints/OLMo-medium/peteish7-anneal-from-928646-50B-nowup-dclm07-flan/))
 - Then run vllm as usual (make sure to import hf_olmo)
 
