@@ -5,7 +5,7 @@ new vllm olmo version: [olmo_new.py](https://github.com/AkshitaB/vllm/blob/main/
 
 ### How to run
 
-- ~~Install vllm from my version (warning: installing from source takes AGES; upwards of 2 hours)~~.
+- ~~Install vllm from my version (warning: installing from source takes AGES; upwards of 2 hours)~~ Not needed, just directly register the model.
 - Register the model:
   ```
   from hf_olmo import *
@@ -34,6 +34,27 @@ llm = LLM(model=path, trust_remote_code=True, gpu_memory_utilization=0.90)
 set_random_seed(0)
 vllm_out = llm.generate([prompt], sampling_params=s)
 outputs["vllm"] = vllm_out[0].outputs[0].text
+```
+
+### Running on nfs machine
+
+```
+beaker session create \
+    --gpus 1 \
+    --budget ai2/allennlp  \
+    --bare \
+    --image beaker://costah/olmo_vllm \
+    --port 7453:8000 \
+    python olmo_vllm.py serve /net/nfs.cirrascale/allennlp/akshitab/model-checkpoints/peteish7/step11931-unsharded-hf
+
+curl http://localhost:7453/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "/net/nfs.cirrascale/allennlp/akshitab/model-checkpoints/peteish7/step11931-unsharded-hf",
+        "prompt": "San Francisco is a",
+        "max_tokens": 7,
+        "temperature": 0
+    }'
 ```
 
 ### Things to keep in mind
